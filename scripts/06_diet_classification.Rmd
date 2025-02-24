@@ -1,0 +1,892 @@
+---
+title: "06_diet_classification"
+output: html_document
+date: "2025-02-17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# packages 
+library(sf)
+library(dplyr)
+
+```
+
+## First we'll assign some latrine metrics/information 
+- Classify by freshwater/saltwater 
+- Calculate distance to saltwater 
+- Assign water body names
+- Assign latrine types 
+- Combine above with spatial covariates 
+```{r}
+####################################
+
+# let's classify latrines by distance to freshwater 
+
+### aquatic 
+# read in water
+water <- st_read(here("spatial_data", 
+                      "DNR_Hydrography_-_Water_Bodies_-_Forest_Practices_Regulation.shp")) 
+
+sf_use_s2(FALSE)
+st_crs(water)
+
+# crop to our map area and put in the projection we're working in
+water <-  water %>%
+  st_transform(crs = 4326) %>% 
+  st_crop(c(xmin= -121.7, ymin = 46.7, xmax = -122.8, ymax = 48.5)) %>%
+  st_transform(crs = 32610) 
+
+# read in our site locations 
+sites <- st_read(here("clean_data", "latrines.shp")) %>% 
+  st_transform(crs = "EPSG:32610")
+
+
+# let's add a new attribute to water that will be based on hydrography categories 
+# according to the metadata https://fortress.wa.gov/dnr/adminsa/GisData/metadata/ROPA_WBHYDRO.pdf
+# and the shoerline data set https://geo.wa.gov/datasets/wadnr::shorezone-inventory-salt-marsh/explore?location=47.903540%2C-122.176510%2C10.00
+# all saltwater bodies are encompassed under "bay"
+
+water <- water %>%
+  mutate(water_type = ifelse(WB_HYDR_FT == "Bay", "saltwater", "freshwater"))
+
+
+# now let's calculate distance to saltwater for each site
+# this is a straight line closest distance 
+
+saltwater <- water %>% filter(water_type == "saltwater")
+
+# calculate the nearest distance from each site to the closest saltwater feature
+sites <- sites %>%
+  mutate(saltwater_dist = st_distance(geometry, st_geometry(saltwater)) %>%
+           apply(1, min))  # get the minimum distance for each point
+
+print(sites)
+
+
+
+
+# now let's concatenate sites with our other spatial covariates 
+
+all_covs <- read_csv(here("spatial_data", "covariates", "ALL_ENV_URB_SITES_2000m.csv"))
+
+
+site_covs <- left_join(sites, all_covs, by = c("city", "site")) %>%
+  select(-c(1:5,8:13))
+
+colnames(site_covs)
+
+# write_csv(site_covs, here("spatial_data", "covariates", "ALL_ENV_URB_WA_SITES_2000m.csv"))
+
+```
+
+
+## Now we'll create some diet categories/classifications
+
+First read in diet data.
+```{r}
+
+verts <- read_csv(here("clean_data", "12S_final.csv"))
+inverts <- read_csv(here("clean_data", "16S_final.csv"))
+site_covs <- read_csv(here("spatial_data", "covariates", "ALL_ENV_URB_WA_SITES_2000m.csv"))
+
+```
+
+
+Next we'll classify diet items into functional groups for GLMM analysis. 
+```{r pressure, echo=FALSE}
+
+#################
+# diet classifications 
+# for freshwater/saltwater, checked using https://www.sealifebase.se/
+## freshwater malacostracae
+# Asellidae (isopod), Cambaridae (crayfish), Astacidae (crayfish)
+
+fresh_mala_fam <- c("Asellidae", "Cambaridae", "Astacidae")
+
+inverts <- inverts %>%
+  mutate(diet_class = ifelse(family %in% fresh_mala_fam, "fresh_mala", NA))
+
+sum(inverts$diet_class == "fresh_mala", na.rm = TRUE)
+
+
+## saltwater malacostracae
+# MANUAL LIST: 
+# Amphiphoidae (amphipods), Aoridae (amphipod), Cancridae (crabs), Caprellidae (amphipod), 
+# Corophiidae (amphipod -- salt and fresh), Dulichiidae (amphipod), Ischyroceridae (amphipod), 
+# Sphaeromatidae (isopod), Varunidae (crabs), Panopeidae (mud crabs), Oregoniidae (crabs), 
+# Paguridae (hermit crabs), Pandalidae (shrimps), Cheiragonidae (helmet crab)
+
+
+inverts %>%
+  filter(class == "Malacostraca") %>%
+  pull(family) %>%
+  unique()
+
+salt_mala_fam <- c("Amphiphoidae", "Aoridae", "Cancridae", "Caprellidae", 
+                   "Corophiidae", "Dulichiidae", "Ischyroceridae", "Sphaeromatidae", 
+                   "Varunidae", "Panopeidae", "Oregoniidae", "Paguridae", 
+                   "Pandalidae", "Cheiragonidae")
+
+inverts <- inverts %>%
+  mutate(diet_class = ifelse(family %in% salt_mala_fam, "salt_mala", diet_class))
+
+sum(inverts$diet_class == "salt_mala", na.rm = TRUE)
+
+## insects
+insects <- c("Insecta") 
+
+inverts <- inverts %>%
+  mutate(diet_class = ifelse(class %in% insects, "insects", diet_class))
+
+sum(inverts$diet_class == "insects", na.rm = TRUE)
+
+## gastropods
+gastropods <- c("Gastropoda") 
+
+inverts <- inverts %>%
+  mutate(diet_class = ifelse(class %in% gastropods, "gastropods", diet_class))
+
+sum(inverts$diet_class == "gastropods", na.rm = TRUE)
+
+#########
+# vert classifications 
+
+## ray finned fishes 
+
+# centrarchiformes, perciformes, blenniiformes (perch-like + surf perch)
+# cypriniformes (cyprinid fish -- carps and minnows)
+# siluriformes (catfish -- all brown bullhead)
+# clupeiformes (pacific herring -- not enough to isolate)
+# pleuronectiformes (flatfish -- 2 spp)
+# salmoniformes 
+
+verts$class
+
+fish <- c("Actinopteri") 
+
+verts <- verts %>%
+  mutate(diet_class = ifelse(class %in% fish, "fish", NA))
+
+sum(verts$diet_class == "fish", na.rm = TRUE)
+
+verts %>%
+  filter(class == "Actinopteri") %>%
+  pull(order) %>%
+  unique()
+
+
+# breaking down groups of ray-finned fish
+
+# perch-like 
+perch <- c("Blenniiformes", "Perciformes", "Cantrarchiformes") 
+
+verts <- verts %>%
+  mutate(diet_class = ifelse(order %in% perch, "perch", diet_class))
+
+sum(verts$diet_class == "perch", na.rm = TRUE)
+
+# cypriniformes
+cypri <- c("Cypriniformes") 
+
+verts <- verts %>%
+  mutate(diet_class = ifelse(order %in% cypri, "cypri", diet_class))
+
+sum(verts$diet_class == "cypri", na.rm = TRUE)
+
+# siluriformes (brownbullhead)
+bullhead <- c("Siluriformes") 
+
+verts <- verts %>%
+  mutate(diet_class = ifelse(order %in% bullhead, "bullhead", diet_class))
+
+sum(verts$diet_class == "bullhead", na.rm = TRUE)
+
+# pleuronectiformes
+flatfish <- c("Pleuronectiformes") 
+
+verts <- verts %>%
+  mutate(diet_class = ifelse(order %in% flatfish, "flatfish", diet_class))
+
+sum(verts$diet_class == "flatfish", na.rm = TRUE)
+
+unique(verts$diet_class)
+
+## ducks  & rails 
+verts %>%
+  filter(class == "Aves") %>%
+  pull(family) %>%
+  unique()
+
+ducksrails <- c("Anatidae", "Rallidae") 
+
+verts <- verts %>%
+  mutate(diet_class = ifelse(family %in% ducksrails, "ducksrails", diet_class))
+
+sum(verts$diet_class == "ducksrails", na.rm = TRUE)
+
+## passerine birds 
+
+passerine <- c("Corvidae", "Turdidae") 
+
+verts <- verts %>%
+  mutate(diet_class = ifelse(family %in% passerine, "passerine", diet_class))
+
+sum(verts$diet_class == "passerine", na.rm = TRUE)
+
+## small mammals -- non-anthro
+verts %>%
+  filter(class == "Mammalia") %>%
+  pull(family) %>%
+  unique()
+
+smallmammals <- c("Muridae", "Castoridae", "Leporidae", "Cricetidae")
+
+verts <- verts %>%
+  mutate(diet_class = ifelse(family %in% smallmammals, "smallmammals", diet_class))
+
+sum(verts$diet_class == "smallmammals", na.rm = TRUE)
+
+## anthropogenic mammals 
+# turkey, chicken, sheep, cow, cat, pig, muscovy duck 
+anthro <- c("Bos" , "Phasianidae" , "Oves" , "Gallus", "Felis", "Sus", "Cairina")
+
+verts <- verts %>%
+  mutate(diet_class = ifelse(genus %in% anthro, "anthro", diet_class))
+
+sum(verts$diet_class == "anthro", na.rm = TRUE)
+
+## salmonids (overwrite salmonids in ray finned)
+
+salmon <- c("Salmonidae") 
+
+verts <- verts %>%
+  mutate(diet_class = ifelse(family %in% salmon, "salmonids", diet_class))
+
+sum(verts$diet_class == "salmonids", na.rm = TRUE)
+
+
+############## 
+## combine all data 
+inverts$processed_taxon
+inverts <- inverts %>% 
+  select(-possible_taxon,superclass)
+
+# Get the full set of column names from both data frames
+all_columns <- union(colnames(verts), colnames(inverts))
+
+# Ensure verts has all columns by adding missing ones with NA
+for (col in setdiff(all_columns, colnames(verts))) {
+  verts[[col]] <- NA
+}
+
+# Ensure inverts has all columns by adding missing ones with NA
+for (col in setdiff(all_columns, colnames(inverts))) {
+  inverts[[col]] <- NA
+}
+
+# Reorder columns to match the full set
+verts <- verts %>% select(all_columns)
+inverts <- inverts %>% select(all_columns)
+
+# Bind the two data frames together
+all_diet <- as.data.frame(bind_rows(verts, inverts))
+class(all_diet)
+
+```
+
+Next we'll classify all diet categories into one of four categories for visualization purposes, as well as classifying species into native or non-native. 
+
+During this step we'll also throw out some diet items that we don't think are ecologically relevant. 
+
+We'll create a new data set, as many taxa will be dropped. 
+
+The four categories will be: saltwater aquatic organisms, freshwater aquatic organisms, waterfowl, mammals. We'll classify each scat going class to class. 
+
+We'll start with invertebrates, see comments below for reasoning on which to drop: 
+```{r}
+head(all_diet)
+
+## insecta
+
+# list all distinct families in Insecta 
+all_diet %>% filter(class == "Insecta") %>% 
+  distinct(family) # we only have to go down to family for insects
+
+# hydrophilidae -- freshwater beetles
+
+# freshwater insects to keep 
+fresh_insects <- c(
+  "Hydrophilidae",  # freshwater beetles
+  "Carabidae", # freshwater beetles 
+  "Dystiscidae", # freshwater beetles 
+  "Staphylinidae", # freshwater rove beetles 
+  'Tachinidae', # parasitoid freshwater flies 
+  "Coenagrionidae", # damselflies 
+  "Micronectidae" # water boatman
+)
+
+# terrestrial arthropods  to keep
+terr_insects <- c(
+  "Diplopoda", # millipedes 
+  "Gryllidae", # crickets 
+  "Curculionidae" # weevils (poplar & willow borer) -- NON NATIVE 
+)
+
+# insects to toss for now -- although they may be eating larvae of this species 
+toss_insects <- c("Chironomidae", # midges -- larvae in winter/spring
+                   "Culicidae", # mosquitoes -- larvae all summer 
+                   "Psychodidae", # moth flies 
+                   "Therevidae", # stiletto flies -- larvae in spring/summer 
+                   "Coccinellidae", # ladybugs, only one occurrence 
+                   "Panorpodidae", # scorpion flies, only one occurrence 
+                   NA# nothing 
+)
+
+# create a new data set
+new_diet <- all_diet %>% 
+  mutate(freshwater = ifelse(family %in% fresh_insects, 1, 0)) # fill all rest with 0s -- only for this first one
+
+new_diet <- new_diet %>% 
+  mutate(terrestrial = ifelse(family %in% terr_insects, 1, 0)) # fill all rest with 0s -- only for this first one
+
+## crustaceans 
+# we already did a salt/freshwater breakdown for malacostracans so we'll use that 
+all_diet %>% filter(subphylum == "Crustacea") %>% 
+  distinct(class)
+
+# ignore all other classes for now 
+
+new_diet <- new_diet %>% 
+  mutate(freshwater = ifelse(family %in% fresh_mala_fam , 1, freshwater))
+
+new_diet <- new_diet %>% 
+  mutate(saltwater = ifelse(family %in% salt_mala_fam , 1, 0)) # first one so we'll fill with 0s
+
+
+# platyhelminths 
+# ligula intestinalis will go under saltwater 
+
+new_diet <- new_diet %>% 
+  mutate(saltwater = ifelse(phylum %in% "Platyhelminthes", 1, saltwater)) 
+
+# mollusks 
+all_diet %>% filter(phylum == "Mollusca") %>% 
+  distinct(class)
+
+all_diet %>% filter(class == "Gastropoda") %>% 
+  distinct(order)
+
+# we'll have to drop all gastropods since we don't have any data on them past class 
+
+all_diet %>% filter(class == "Bivalvia") %>% 
+  distinct(order)
+
+all_diet %>% filter(order == "Venerida") %>% 
+  distinct(species)
+
+fresh_bivalve <-  c(
+"Venerida" # all fingernail clam 
+)
+
+new_diet <- new_diet %>% 
+  mutate(freshwater = ifelse(family %in% fresh_bivalve, 1, freshwater)) 
+
+
+## remaining invertebrates 
+# we're going to throw out all other invertebrates 
+# branchiopods because they're all daphnia 
+# hexanauplia & ostracoda bc they only had 1-2 and only amplified to family
+# ones that have NA for family because we dont have enough info 
+# arachnida because they're bird mites 
+# collembola bc they're globular springtails
+
+remove_inverts <- c("Branchiopoda", "Hexanauplia", "Ostracoda", "Arachnida", "Collembola", "Gastropoda")
+
+new_diet <- new_diet %>%
+  filter(
+    !class %in% remove_inverts,  
+    !is.na(class),                  
+    !is.na(family)                  
+  )
+
+# let's also start a new column for native vs. non-native inverts, and add our non-native inverts to it 
+non_native_insects_sp <- c("Aoroides columbiae",
+                           "Procambarus clarkii",
+                           "Faxonius virilis",
+                           "Oronectes rusticus",
+                           "Acrosternum hilare",
+                           "Rhagonycha fulva",
+                           "Cipangopaludina chinensis"
+                        )
+
+non_native_insects_gen <- c("Cryptorynchus",
+                            "Tetramorium"
+)
+
+new_diet <- new_diet %>% 
+  mutate(non_native = ifelse(species %in% non_native_insects_sp, 1, 0))    # 0 for first one
+
+new_diet <- new_diet %>% 
+  mutate(non_native = ifelse(genus %in% non_native_insects_gen, 1, non_native))    
+  
+```
+
+Now vertebrates, starting with fish -- in this data set all fish were in class Actinopteri. 
+
+```{r}
+
+list(new_diet %>% filter(class == "Actinopteri") %>% 
+  distinct(family))
+
+# family cottidae
+list(new_diet %>% filter(family == "Cottidae") %>% 
+  distinct(species))
+
+list(new_diet %>% filter(family == "Cottidae") %>% 
+  distinct(genus))
+
+
+fresh_fish_gen <- c("Cottus") # freshwater sculpins
+
+salt_fish_sp <- c("Scorpaenichthys marmoratus",  # cabezon
+               "Leptocottus armatus", # pacific staghorn sculpin
+               "Clinocottus acuticeps", # sharpnose sculpin
+               "Hemilepidotus hemilepidotus") # red irish lord
+
+# family psychrolutidae
+list(new_diet %>% filter(family == "Psychrolutidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family == "Psychrolutidae") %>% 
+  distinct(species))
+
+salt_fish_sp <- c(salt_fish_sp, "Dasycottus setiger") # spinyhead sculpin
+
+# family gasterosteidae
+list(new_diet %>% filter(family == "Gasterosteidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family == "Gasterosteidae") %>% 
+  distinct(species))
+
+salt_fish_sp <- c(salt_fish_sp, "Gasterosteus aculeatus") # three-spined stickleback, BOTH fresh and salt 
+fresh_fish_sp <- c(fresh_fish_sp, "Gasterosteus aculeatus") # three-spined stickleback, BOTH fresh and salt 
+
+# family centrarchidae
+list(new_diet %>% filter(family == "Centrarchidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family == "Centrarchidae") %>% 
+  distinct(species))
+
+fresh_fish_sp <- c(fresh_fish_sp, "Ambloplites rupestris",# rock bass -- NON-NATIVE 
+                   "Lepomis cyanellus", # green sunfish -- NON-NATIVE 
+                   "Lepomis gibbosus", # pumpkinseed sunfish-- NON-NATIVE, considered invasive, maybe brackish too ?
+                  "Micropterus dolomieu", # smallmouth bass -- NON-NATIVE
+                  "Micropterus salmoides", # largemouth bass -- NON-NATIVE 
+                  "Pomoxis nigromaculatus" # black crappie -- NON-NATIVE 
+                  ) 
+
+non_native_fish <- c("Ambloplites rupestris", "Lepomis cyanellus","Lepomis gibbosus","Micropterus dolomieu","Micropterus salmoides","Pomoxis nigromaculatus")
+
+# family ictaluridae
+list(new_diet %>% filter(family == "Ictaluridae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Ictaluridae") %>% 
+  distinct(species))
+
+fresh_fish_sp <- c(fresh_fish_sp, "Ameiurus nebulosus")  # brown bullhead catfish -- NON-NATIVE 
+
+non_native_fish <- c(non_native_fish, "Ameiurus nebulosus")
+
+# family cyprinidae 
+list(new_diet %>% filter(family == "Cyprinidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Cyprinidae") %>% 
+  distinct(species))
+
+fresh_fish_sp <- c(fresh_fish_sp, "Cyprinus carpio")  # common carp -- NON-NATIVE 
+
+non_native_fish <- c(non_native_fish, "Cyprinus carpio")
+
+# family cobitidae
+list(new_diet %>% filter(family == "Cobitidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Cobitidae") %>% 
+  distinct(species))
+
+fresh_fish_sp <- c(fresh_fish_sp, "Misgurnus anguillicaudatus")  # pond loach -- NON-NATIVE 
+
+non_native_fish <- c(non_native_fish, "Misgurnus anguillicaudatus")
+
+# family leuciscidae
+list(new_diet %>% filter(family == "Leuciscidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Leuciscidae") %>% 
+  distinct(species))
+
+fresh_fish_sp <- c(fresh_fish_sp, "Mylocheilus caurinus", # peamouth
+                   "Rhinichthys cataractae" #longnose dace minnow
+                   )
+
+# family percidae
+list(new_diet %>% filter(family == "Percidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Percidae") %>% 
+  distinct(species))
+
+fresh_fish_sp <- c(fresh_fish_sp, "Perca flavescens" # yellow perch -- NON-NATIVE 
+                   )
+
+non_native_fish <- c(non_native_fish, "Perca flavescens")
+
+# family catostomidae
+list(new_diet %>% filter(family == "Catostomidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Catostomidae") %>% 
+  distinct(species))
+
+fresh_fish_sp <- c(fresh_fish_sp, "Catostomus macrocheilus" # largescale sucker 
+                   )
+
+# family stichaeidae
+list(new_diet %>% filter(family == "Stichaeidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Stichaeidae") %>% 
+  distinct(species))
+
+salt_fish_sp <- c(salt_fish_sp, "Anoplarchus insignis", # slender cockscomb 
+                  "Lumpenus sagitta",  # snake prickleback
+                  "Xiphister atropurpureus" # black prickleback
+                  )
+
+# family Salmonidae
+list(new_diet %>% filter(family == "Salmonidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Salmonidae") %>% 
+  distinct(species))
+
+# salmon are anadromous so they will be BOTH fresh and salt 
+salt_fish_sp <- c(salt_fish_sp, "Oncorhynchus tshawytscha", # chinook salmon
+                  "Oncorhynchus clarkii", # cutthroat trout 
+                  "Oncorhynchus gorbuscha", # pink salmon
+                 "Oncorhynchus kisutch" # coho salmon
+                  )
+
+salt_fish_sp <- c(salt_fish_sp, "Oncorhynchus tshawytscha",
+                  "Oncorhynchus clarkii",
+                  "Oncorhynchus gorbuscha",
+                  "Oncorhynchus kisutch"
+                  )
+
+
+# family Anarhichadidae
+list(new_diet %>% filter(family == "Anarhichadidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Anarhichadidae") %>% 
+  distinct(species))
+
+salt_fish_sp <- c(salt_fish_sp, "Anarrhichthys ocellatus" # wolf-eel
+                  )
+
+# family Pleuronectidae
+list(new_diet %>% filter(family == "Pleuronectidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Pleuronectidae") %>% 
+  distinct(species))
+
+salt_fish_sp <- c(salt_fish_sp, "Lepidopsetta bilineata", # pacific rock sole 
+                  "Platichthys stellatus",# starry flounder
+                  "Pleuronichthys coenosus" # C-O sole
+                  )
+
+# family Clupeidae
+list(new_diet %>% filter(family == "Clupeidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Clupeidae") %>% 
+  distinct(species))
+
+salt_fish_sp <- c(salt_fish_sp, "Clupea pallasii" # pacific herring
+                  )
+
+
+# family Pholidae
+list(new_diet %>% filter(family == "Pholidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Pholidae") %>% 
+  distinct(species))
+
+salt_fish_sp <- c(salt_fish_sp, "Pholis ornata", # saddleback gunnel
+                  "Apodichthys flavidus" # penpoint gunnel
+)
+                  
+
+# family Hexagrammidae
+list(new_diet %>% filter(family == "Hexagrammidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Hexagrammidae") %>% 
+  distinct(species))
+
+salt_fish_sp <- c(salt_fish_sp, "Ophiodon elongatus", # lingcod
+                  "Hexagrammos lagocephalus" # rock greenling
+)
+              
+
+# family Jordaniidae
+list(new_diet %>% filter(family == "Jordaniidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Jordaniidae") %>% 
+  distinct(species))
+
+salt_fish_sp <- c(salt_fish_sp, "Jordania zonope" # longfin sculpin
+                  )
+
+# family Agonidae
+list(new_diet %>% filter(family == "Agonidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Agonidae") %>% 
+  distinct(species))
+
+salt_fish_sp <- c(salt_fish_sp, "Agonopsis vulsa", # northern spearnose poacher
+                  "Blepsias cirrhosus" # silverspotted sculpin
+                  )
+
+# family Embiotocidae
+list(new_diet %>% filter(family == "Embiotocidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Embiotocidae") %>% 
+  distinct(species))
+
+salt_fish_sp <- c(salt_fish_sp, "Cymatogaster aggregata" # shiner perch 
+                  )
+
+# family Cyclopsettidae
+list(new_diet %>% filter(family == "Cyclopsettidae") %>% 
+  distinct(genus))
+
+list(new_diet %>% filter(family =="Cyclopsettidae") %>% 
+  distinct(species))
+
+salt_fish_sp <- c(salt_fish_sp, "Citharichthys stigmaeus" # speckled sanddab
+                  )
+
+```
+
+Next we'll do the same with mammals.
+```{r}
+
+list(new_diet %>% filter(class == "Mammalia") %>% 
+  distinct(family))
+
+list(new_diet %>% filter(family == "Mustelidae") %>% 
+  distinct(genus))
+# almost all families are associated with terrestrial environments, except beavers (Castoridae) and mink (Mustelidae)
+terr_mamm_fam <- c("Felidae", "Muridae") 
+
+fresh_mamm_fam <- c("Mustelidae", "Castoridae")
+
+```
+
+
+Now birds. For now we'll classify all waterfowl that exists in both fresh & marine habitats in WA in both groups. 
+
+```{r}
+list(new_diet %>% filter(class == "Aves") %>% 
+  distinct(family))
+
+
+# ducks and rails 
+salt_birds <- c("Anas acuta", # northern pintail -- fresh and marsh/brackish
+                "Histrionicus histrionicus", # harlequin duck -- sea duck but also fresh 
+                "Mareca americana", # american wigeon -- both 
+                "Anas crecca", # green-winged teal -- both 
+                "Clangula hyemalis", # long-tailed duck; sea duck, only in marine in WA 
+                )
+
+fresh_birds <- c("Anser albifrons", # greater white fronted goose -- freshwater, rare, passes through in spring migration ! 
+                 "Cairina moschata" # muscovy duck -- NON-NATIVE domestic -- freshwater
+                 "Fulica americana" # american coot -- mostly freshwater 
+                 "Gruis canadensis" # sandhill crane -- mostly freshwater, may just be coots with seq error tbh
+                 )
+
+# passerines & chickens -- we'll classify as terrestrial 
+terr_birds <- c("Gallus gallus",
+                "Turdus migratorius",
+                "Corvus brachyrhynchos")
+
+# non native birds
+non_native_birds <- c("Cairina moschata") 
+
+
+```
+
+Now amphibians.
+```{r}
+list(new_diet %>% filter(class == "Amphibia") %>% 
+  distinct(family))
+
+
+fresh_amph <- c("Aquarana catesbeiana", # american bullfrog -- NON-NATIVE 
+                "Ambystoma"
+)
+
+non_native_amph <- c("Aquarana catesbeiana")
+
+              
+
+
+```
+
+Now Hyperoartia (lampreys).
+```{r}
+
+```
+
+Now assign vertebrate habitat classifications to the data set.
+```{r}
+
+new_diet <- new_diet %>% 
+  mutate(freshwater = ifelse(family %in% fresh_fish_sp, 1, freshwater)) %>% 
+  mutate(freshwater = ifelse(family %in% fresh_fish_gen, 1, freshwater))  %>% 
+  mutate(freshwater = ifelse(family %in% fresh_mamm_fam, 1, freshwater)) 
+
+new_diet <- new_diet %>% 
+  mutate(saltwater = ifelse(family %in% salt_fish_sp, 1, saltwater)) 
+
+new_diet <- new_diet %>% 
+  mutate(terrestrial = ifelse(family %in% terr_mamm_fam, 1, terrestrial)) 
+
+
+non_native_fish
+non_native_insects_sp
+non_native_insects_gen
+non_native_amph
+
+```
+
+
+Remove all rows that don't have class or family assigned. 
+```{r}
+# now remove all rows where we don't have class or family
+
+new_diet <- new_diet %>%
+  filter(
+    !is.na(class),                  
+    !is.na(family)                  
+  )
+
+```
+
+Now assign diet classifications. 
+```{r}
+new_diet <- new_diet %>%
+  mutate(
+    fish = ifelse(diet_class == "fish", 1, ifelse(is.na(diet_class), 0, 0)),
+    ducksrails = ifelse(diet_class == "ducksrails", 1, ifelse(is.na(diet_class), 0, 0)),
+    anthro = ifelse(diet_class == "anthro", 1, ifelse(is.na(diet_class), 0, 0)),
+    smallmammals = ifelse(diet_class == "smallmammals", 1, ifelse(is.na(diet_class), 0, 0)),
+    salmonids = ifelse(diet_class == "salmonids", 1, ifelse(is.na(diet_class), 0, 0)),
+    passerine = ifelse(diet_class == "passerine", 1, ifelse(is.na(diet_class), 0, 0)),
+    fresh_mala = ifelse(diet_class == "fresh_mala", 1, ifelse(is.na(diet_class), 0, 0)),
+    salt_mala = ifelse(diet_class == "salt_mala", 1, ifelse(is.na(diet_class), 0, 0)),
+    dungeness = ifelse(diet_class == "dungeness", 1, ifelse(is.na(diet_class), 0, 0)),
+    perch = ifelse(diet_class == "perch", 1, ifelse(is.na(diet_class), 0, 0)),
+    cypri = ifelse(diet_class == "cypri", 1, ifelse(is.na(diet_class), 0, 0)),
+    bullhead = ifelse(diet_class == "bullhead", 1, ifelse(is.na(diet_class), 0, 0)),
+    flatfish = ifelse(diet_class == "flatfish", 1, ifelse(is.na(diet_class), 0, 0)),
+    insects = ifelse(diet_class == "insects", 1, ifelse(is.na(diet_class), 0, 0)),
+    gastropods = ifelse(diet_class == "gastropods", 1, ifelse(is.na(diet_class), 0, 0)),
+  ) %>% 
+  mutate(across(starts_with("fish"):starts_with("gastropods"), ~ replace(., is.na(.), 0)))  
+
+
+# let's save our final diet data set 
+write_csv(new_diet, here("clean_data", "combined_diet_16s_12s_ms.csv"))
+```
+
+Finally, we'll bind the diet data back to the covariate data. 
+```{r}
+
+# let's add covariates to diet data 
+# first we need to add site names to the diet list 
+
+## re-read in all the data 
+
+new_diet <- read_csv(here("clean_data", "combined_diet_16s_12s_ms.csv"))
+site_covs <- read_csv(here("spatial_data", "covariates", "ALL_ENV_URB_WA_SITES_2000m.csv"))
+
+metadata <- read_csv(here("data_from_ellie", "field_site_data.csv")) %>% 
+  rename(sample_ID = "Scat ID",
+         site = "Site",
+         date = "Date", 
+         month = "Month", 
+         city = "City") %>% 
+  select(sample_ID, site, date, month, city)
+
+new_diet <- left_join(new_diet, metadata, by = c("sample_ID"))
+
+# now join the spatial data
+new_diet <- left_join(new_diet, site_covs, by = c("city", "site"))
+
+
+# for some reason LCP047 is missing site data 
+# it's from FGL so we'll fill the columns based on that 
+colnames(new_diet)
+
+new_diet <- new_diet %>%
+  mutate(site = ifelse(grepl("LC047", sample_ID), "FGL", site)) %>%
+  group_by(site) %>%
+  mutate(across(35:62, ~ ifelse(sample_ID == "LC047" & is.na(.), first(na.omit(.)), .))) %>%
+  ungroup()
+
+
+# we'll change cornet bay to match the others 
+"Cornet Bay" "CBW"
+
+# we'll also add water body names to each site 
+all_diet <- all_diet %>% 
+  mutate(waterbody = case_when(
+    site %in% c("LNM", "LWM", "MBB", "LSM", "LBP", "WNP", "CBM") ~ "Lake Washington",
+    site %in% c("FGL", "DSS", "CWG", "BRF") ~ "Duwamish/Green River",
+    site %in% c("BSW", "WPA") ~ "Portage & Union Bays",
+    site %in% c("Cornet Bay", "GGP", "DNB") ~ "Puget Sound", 
+    site %in% c("RVL", "GGC") ~ "Kelsey Creek")
+  )
+
+# we'll also add latrine type 
+all_diet <- all_diet %>% 
+  mutate(latrinetype = case_when(
+    site %in% c("LNM", "LWM", "LSM", "CBM", "BSW", "WPA") ~ "Docks and marinas",
+    site %in% c("FGL", "GGC") ~ "Golf courses",
+    site %in% c("WNP", "DSS", "CWG", "BRF",  "CBW", "DNB", "MBB", "RVL", "GGP") ~ "Natural shoreline")
+  )
+
+# let's make our variables factors 
+all_diet$waterbody <- as.factor(all_diet$waterbody)
+all_diet$site <- as.factor(all_diet$site)
+
+write_csv(all_diet, here("clean_data", "combined_diet_covs_all_ms.csv"))
+```
+
+
